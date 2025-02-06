@@ -37,25 +37,28 @@ class TransformUtil {
   private static final int EPOCH_YEAR = EPOCH.getYear();
 
   static String humanYear(int yearOrdinal) {
-    return String.format(Locale.ROOT, "%04d", EPOCH_YEAR + yearOrdinal);
+    StringBuilder sb = new StringBuilder(4);
+    appendLeadingZeros(sb, EPOCH_YEAR + yearOrdinal, 4);
+    return sb.toString();
   }
 
   static String humanMonth(int monthOrdinal) {
-    return String.format(
-        Locale.ROOT,
-        "%04d-%02d",
-        EPOCH_YEAR + Math.floorDiv(monthOrdinal, 12),
-        1 + Math.floorMod(monthOrdinal, 12));
+    StringBuilder sb = new StringBuilder(7);
+    appendLeadingZeros(sb, EPOCH_YEAR + Math.floorDiv(monthOrdinal, 12), 4);
+    sb.append('-');
+    appendLeadingZeros(sb, 1 + Math.floorMod(monthOrdinal, 12), 2);
+    return sb.toString();
   }
 
   static String humanDay(int dayOrdinal) {
     OffsetDateTime day = EPOCH.plusDays(dayOrdinal);
-    return String.format(
-        Locale.ROOT,
-        "%04d-%02d-%02d",
-        day.getYear(),
-        day.getMonth().getValue(),
-        day.getDayOfMonth());
+    StringBuilder sb = new StringBuilder(10);
+    appendLeadingZeros(sb, day.getYear(), 4);
+    sb.append('-');
+    appendLeadingZeros(sb, day.getMonth().getValue(), 2);
+    sb.append('-');
+    appendLeadingZeros(sb, day.getDayOfMonth(), 2);
+    return sb.toString();
   }
 
   static String humanTime(Long microsFromMidnight) {
@@ -80,13 +83,15 @@ class TransformUtil {
 
   static String humanHour(int hourOrdinal) {
     OffsetDateTime time = EPOCH.plusHours(hourOrdinal);
-    return String.format(
-        Locale.ROOT,
-        "%04d-%02d-%02d-%02d",
-        time.getYear(),
-        time.getMonth().getValue(),
-        time.getDayOfMonth(),
-        time.getHour());
+    StringBuilder sb = new StringBuilder(13);
+    appendLeadingZeros(sb, time.getYear(), 4);
+    sb.append('-');
+    appendLeadingZeros(sb, time.getMonth().getValue(), 2);
+    sb.append('-');
+    appendLeadingZeros(sb, time.getDayOfMonth(), 2);
+    sb.append('-');
+    appendLeadingZeros(sb, time.getHour(), 2);
+    return sb.toString();
   }
 
   static String base64encode(ByteBuffer buffer) {
@@ -98,5 +103,15 @@ class TransformUtil {
     // test the granularity, in hours. hour(ts) => 1 hour, day(ts) => 24 hours, and hour satisfies
     // the order of day
     return leftGranularity.getDuration().toHours() <= rightGranularity.getDuration().toHours();
+  }
+
+  private static void appendLeadingZeros(StringBuilder sb, int value, int digits) {
+    String strValue = Integer.toString(value);
+    int padding = digits - strValue.length();
+
+    for (int i = 0; i < padding; i++) {
+      sb.append('0');
+    }
+    sb.append(strValue);
   }
 }
