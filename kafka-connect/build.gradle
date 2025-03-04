@@ -264,3 +264,9 @@ project(':iceberg-kafka-connect:iceberg-kafka-connect-transforms') {
     useJUnitPlatform()
   }
 }
+
+
+// there are no Maven artifacts so disable publishing tasks...
+project.afterEvaluate {
+  project.tasks.matching { it.group == 'publishing' }.each {it.enabled = false}
+}
