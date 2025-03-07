@@ -37,28 +37,30 @@ class TransformUtil {
   private static final int EPOCH_YEAR = EPOCH.getYear();
 
   static String humanYear(int yearOrdinal) {
-    StringBuilder sb = new StringBuilder(4);
-    appendLeadingZeros(sb, EPOCH_YEAR + yearOrdinal, 4);
-    return sb.toString();
+    char[] result = new char[4];
+    appendNumber(result, EPOCH_YEAR + yearOrdinal, 0, 4);
+    return new String(result);
   }
 
   static String humanMonth(int monthOrdinal) {
-    StringBuilder sb = new StringBuilder(7);
-    appendLeadingZeros(sb, EPOCH_YEAR + Math.floorDiv(monthOrdinal, 12), 4);
-    sb.append('-');
-    appendLeadingZeros(sb, 1 + Math.floorMod(monthOrdinal, 12), 2);
-    return sb.toString();
+    char[] result = new char[7];
+    int year = EPOCH_YEAR + Math.floorDiv(monthOrdinal, 12);
+    appendNumber(result, year, 0, 4);
+    result[4] = '-';
+    appendNumber(result, 1 + Math.floorMod(monthOrdinal, 12), 5, 2);
+    return new String(result);
   }
 
   static String humanDay(int dayOrdinal) {
     OffsetDateTime day = EPOCH.plusDays(dayOrdinal);
-    StringBuilder sb = new StringBuilder(10);
-    appendLeadingZeros(sb, day.getYear(), 4);
-    sb.append('-');
-    appendLeadingZeros(sb, day.getMonth().getValue(), 2);
-    sb.append('-');
-    appendLeadingZeros(sb, day.getDayOfMonth(), 2);
-    return sb.toString();
+
+    char[] result = new char[10];
+    appendNumber(result, day.getYear(), 0, 4);
+    result[4] = '-';
+    appendNumber(result, day.getMonth().getValue(), 5, 2);
+    result[7] = '-';
+    appendNumber(result, day.getDayOfMonth(), 8, 2);
+    return new String(result);
   }
 
   static String humanTime(Long microsFromMidnight) {
@@ -83,15 +85,15 @@ class TransformUtil {
 
   static String humanHour(int hourOrdinal) {
     OffsetDateTime time = EPOCH.plusHours(hourOrdinal);
-    StringBuilder sb = new StringBuilder(13);
-    appendLeadingZeros(sb, time.getYear(), 4);
-    sb.append('-');
-    appendLeadingZeros(sb, time.getMonth().getValue(), 2);
-    sb.append('-');
-    appendLeadingZeros(sb, time.getDayOfMonth(), 2);
-    sb.append('-');
-    appendLeadingZeros(sb, time.getHour(), 2);
-    return sb.toString();
+    char[] result = new char[13];
+    appendNumber(result, time.getYear(), 0, 4);
+    result[4] = '-';
+    appendNumber(result, time.getMonth().getValue(), 5, 2);
+    result[7] = '-';
+    appendNumber(result, time.getDayOfMonth(), 8, 2);
+    result[10] = '-';
+    appendNumber(result, time.getHour(), 11, 2);
+    return new String(result);
   }
 
   static String base64encode(ByteBuffer buffer) {
@@ -105,13 +107,11 @@ class TransformUtil {
     return leftGranularity.getDuration().toHours() <= rightGranularity.getDuration().toHours();
   }
 
-  private static void appendLeadingZeros(StringBuilder sb, int value, int digits) {
-    String strValue = Integer.toString(value);
-    int padding = digits - strValue.length();
-
-    for (int i = 0; i < padding; i++) {
-      sb.append('0');
+  private static void appendNumber(char[] result, int number, int startIndex, int digits) {
+    int val = number;
+    for (int i = digits - 1; i >= 0; i--) {
+      result[startIndex + i] = (char) ('0' + (val % 10));
+      val /= 10;
     }
-    sb.append(strValue);
   }
 }
