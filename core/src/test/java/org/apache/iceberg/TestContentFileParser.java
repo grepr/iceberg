@@ -25,6 +25,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Map;
 import java.util.stream.Stream;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.types.Comparators;
@@ -51,15 +52,31 @@ public class TestContentFileParser {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("Invalid JSON generator: null");
 
-    assertThatThrownBy(() -> ContentFileParser.fromJson(null, TestBase.SPEC))
+    assertThatThrownBy(
+            () -> ContentFileParser.fromJson(null, Map.of(TestBase.SPEC.specId(), TestBase.SPEC)))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("Invalid JSON node for content file: null");
 
     String jsonStr = ContentFileParser.toJson(TestBase.FILE_A, TestBase.SPEC);
     JsonNode jsonNode = JsonUtil.mapper().readTree(jsonStr);
-    assertThatThrownBy(() -> ContentFileParser.fromJson(jsonNode, null))
+    assertThatThrownBy(() -> ContentFileParser.fromJson(jsonNode, (PartitionSpec) null))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("Invalid partition spec: null");
+  }
+
+  @Test
+  public void testNanCountsOnlyWritesNanValueCounts() throws Exception {
+    PartitionSpec spec = PartitionSpec.unpartitioned();
+    DataFile dataFile = dataFileWithOnlyNanCounts(spec);
+    String jsonStr = ContentFileParser.toJson(dataFile, spec);
+    // ensure nan counts are present and null counts are not emitted
+    assertThat(jsonStr).contains("\"nan-value-counts\"");
+    assertThat(jsonStr).doesNotContain("\"null-value-counts\"");
+    JsonNode jsonNode = JsonUtil.mapper().readTree(jsonStr);
+    ContentFile<?> deserialized =
+        ContentFileParser.fromJson(jsonNode, Map.of(TestBase.SPEC.specId(), spec));
+    assertThat(deserialized).isInstanceOf(DataFile.class);
+    assertContentFileEquals(dataFile, deserialized, spec);
   }
 
   @ParameterizedTest
@@ -69,7 +86,8 @@ public class TestContentFileParser {
     String jsonStr = ContentFileParser.toJson(dataFile, spec);
     assertThat(jsonStr).isEqualTo(expectedJson);
     JsonNode jsonNode = JsonUtil.mapper().readTree(jsonStr);
-    ContentFile<?> deserializedContentFile = ContentFileParser.fromJson(jsonNode, spec);
+    ContentFile<?> deserializedContentFile =
+        ContentFileParser.fromJson(jsonNode, Map.of(TestBase.SPEC.specId(), spec));
     assertThat(deserializedContentFile).isInstanceOf(DataFile.class);
     assertContentFileEquals(dataFile, deserializedContentFile, spec);
   }
@@ -81,7 +99,8 @@ public class TestContentFileParser {
     String jsonStr = ContentFileParser.toJson(deleteFile, spec);
     assertThat(jsonStr).isEqualTo(expectedJson);
     JsonNode jsonNode = JsonUtil.mapper().readTree(jsonStr);
-    ContentFile<?> deserializedContentFile = ContentFileParser.fromJson(jsonNode, spec);
+    ContentFile<?> deserializedContentFile =
+        ContentFileParser.fromJson(jsonNode, Map.of(spec.specId(), TestBase.SPEC));
     assertThat(deserializedContentFile).isInstanceOf(DeleteFile.class);
     assertContentFileEquals(deleteFile, deserializedContentFile, spec);
   }
@@ -115,6 +134,30 @@ public class TestContentFileParser {
 
     if (spec.isPartitioned()) {
       // easy way to set partition data for now
+      builder.withPartitionPath("data_bucket=1");
+    }
+
+    return builder.build();
+  }
+
+  private static DataFile dataFileWithOnlyNanCounts(PartitionSpec spec) {
+    DataFiles.Builder builder =
+        DataFiles.builder(spec)
+            .withPath("/path/to/data-nan-only.parquet")
+            .withMetrics(
+                new Metrics(
+                    1L, // record count
+                    null, // column sizes
+                    null, // value counts
+                    null, // null value counts (intentionally null)
+                    ImmutableMap.of(3, 0L), // nan value counts present
+                    null, // lower bounds
+                    null // upper bounds
+                    ))
+            .withFileSizeInBytes(10)
+            .withRecordCount(1);
+
+    if (spec.isPartitioned()) {
       builder.withPartitionPath("data_bucket=1");
     }
 
