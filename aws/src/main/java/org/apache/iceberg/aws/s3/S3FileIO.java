@@ -520,6 +520,7 @@ public class S3FileIO
 
   @Override
   public void close() {
+    LOG.info("Closing S3FileIO with stacktrace: {}", Arrays.toString(Thread.currentThread().getStackTrace()));
     // handles concurrent calls to close()
     if (isResourceClosed.compareAndSet(false, true)) {
       if (clientByPrefix != null) {

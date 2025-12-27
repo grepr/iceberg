@@ -18,6 +18,8 @@
  */
 package org.apache.iceberg.aws;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.awscore.client.builder.AwsSyncClientBuilder;
 import software.amazon.awssdk.http.SdkHttpClient;
 
@@ -31,6 +33,7 @@ import software.amazon.awssdk.http.SdkHttpClient;
  * client type (Apache, UrlConnection, etc.).
  */
 abstract class BaseHttpClientConfigurations {
+  private static final Logger LOG = LoggerFactory.getLogger(BaseHttpClientConfigurations.class);
 
   private static final HttpClientCache CACHE = HttpClientCache.instance();
 
@@ -67,6 +70,8 @@ abstract class BaseHttpClientConfigurations {
    */
   public <T extends AwsSyncClientBuilder> void configureHttpClientBuilder(T awsClientBuilder) {
     String cacheKey = generateHttpClientCacheKey();
+
+    LOG.info("Configuring http client builder with cache key: {}", cacheKey);
 
     SdkHttpClient managedHttpClient = CACHE.getOrCreateClient(cacheKey, this::buildHttpClient);
 

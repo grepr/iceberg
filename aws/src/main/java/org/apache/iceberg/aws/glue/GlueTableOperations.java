@@ -112,7 +112,10 @@ class GlueTableOperations extends BaseMetastoreTableOperations {
   @Override
   public FileIO io() {
     if (fileIO == null) {
+      LOG.info("Initializing Glue table operations with catalog: {}", databaseName);
       fileIO = initializeFileIO(this.tableCatalogProperties, this.hadoopConf);
+    } else {
+      LOG.info("Glue table operations with catalog: {}", databaseName);
     }
     return fileIO;
   }

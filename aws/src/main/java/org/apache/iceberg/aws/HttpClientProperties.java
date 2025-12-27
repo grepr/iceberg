@@ -24,9 +24,13 @@ import java.util.Map;
 import org.apache.iceberg.common.DynMethods;
 import org.apache.iceberg.relocated.com.google.common.base.Strings;
 import org.apache.iceberg.util.PropertyUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.awscore.client.builder.AwsSyncClientBuilder;
 
+
 public class HttpClientProperties implements Serializable {
+  private static final Logger LOG = LoggerFactory.getLogger(HttpClientProperties.class);
 
   /**
    * The type of {@link software.amazon.awssdk.http.SdkHttpClient} implementation used by {@link
@@ -223,6 +227,7 @@ public class HttpClientProperties implements Serializable {
         urlConnectionHttpClientConfigurations.configureHttpClientBuilder(builder);
         break;
       case CLIENT_TYPE_APACHE:
+        LOG.info("Configuring Apache HttpClient");
         ApacheHttpClientConfigurations apacheHttpClientConfigurations =
             loadHttpClientConfigurations(ApacheHttpClientConfigurations.class.getName());
         apacheHttpClientConfigurations.configureHttpClientBuilder(builder);

@@ -18,6 +18,7 @@
  */
 package org.apache.iceberg.aws;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentMap;
@@ -123,7 +124,8 @@ final class HttpClientCache {
         throw new IllegalStateException("Cannot acquire closed HTTP client: " + clientKey);
       }
       refCount++;
-      LOG.debug("Acquired HTTP client: key={}, refCount={}", clientKey, refCount);
+      LOG.info("Acquired HTTP client: key={}, refCount={}, stack: {}", clientKey, refCount,
+              Arrays.toString(Thread.currentThread().getStackTrace()));
       return this;
     }
 
@@ -140,8 +142,11 @@ final class HttpClientCache {
       }
 
       refCount--;
-      LOG.debug("Released HTTP client: key={}, refCount={}", clientKey, refCount);
+      LOG.info("Released HTTP client: key={}, refCount={}, stack: {}", clientKey, refCount,
+              Arrays.toString(Thread.currentThread().getStackTrace()));
       if (refCount == 0) {
+        LOG.info("Closing HTTP client: key={}, refCount={}, stack: {}", clientKey, refCount,
+                Arrays.toString(Thread.currentThread().getStackTrace()));
         return closeHttpClient();
       } else if (refCount < 0) {
         LOG.warn(
@@ -164,7 +169,7 @@ final class HttpClientCache {
     private boolean closeHttpClient() {
       if (!closed) {
         closed = true;
-        LOG.debug("Closing HTTP client: key={}", clientKey);
+        LOG.info("Closing HTTP client: key={}", clientKey);
         try {
           httpClient.close();
         } catch (Exception e) {
