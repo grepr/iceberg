@@ -43,7 +43,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish iceberg-api package
+      - name: Publish iceberg-aws package
         run: ./gradlew :iceberg-aws:publishGreprPublicationToGitHubPackagesRepository
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish iceberg-core package
+        run: ./gradlew :iceberg-core:publishGreprPublicationToGitHubPackagesRepository
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
