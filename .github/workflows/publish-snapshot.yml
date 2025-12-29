@@ -52,4 +52,8 @@ jobs:
         run: ./gradlew :iceberg-core:publishGreprPublicationToGitHubPackagesRepository
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
+
+      - name: Publish iceberg-flink package
+        run: ./gradlew :iceberg-flink:publishGreprPublicationToGitHubPackagesRepository
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
