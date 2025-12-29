@@ -72,3 +72,8 @@ jobs:
         run: ./gradlew :iceberg-parquet:publishGreprPublicationToGitHubPackagesRepository
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish iceberg-orc package
+        run: ./gradlew :iceberg-orc:publishGreprPublicationToGitHubPackagesRepository
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
