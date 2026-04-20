@@ -504,17 +504,19 @@ public class S3FileIO
   @SuppressWarnings("CatchBlockLogException")
   private void initMetrics(Map<String, String> props) {
     // Report Hadoop metrics if Hadoop is available
+    // Support custom metrics context class via io.metrics.context.class property
+    String metricsContextClass = props.getOrDefault("io.metrics.context.class", DEFAULT_METRICS_IMPL);
     try {
       DynConstructors.Ctor<MetricsContext> ctor =
           DynConstructors.builder(MetricsContext.class)
-              .hiddenImpl(DEFAULT_METRICS_IMPL, String.class)
+              .hiddenImpl(metricsContextClass, String.class)
               .buildChecked();
       MetricsContext context = ctor.newInstance(ROOT_PREFIX);
       context.initialize(props);
       this.metrics = context;
     } catch (NoClassDefFoundError | NoSuchMethodException | ClassCastException e) {
       LOG.warn(
-          "Unable to load metrics class: '{}', falling back to null metrics", DEFAULT_METRICS_IMPL);
+          "Unable to load metrics class: '{}', falling back to null metrics", metricsContextClass);
     }
   }
 
