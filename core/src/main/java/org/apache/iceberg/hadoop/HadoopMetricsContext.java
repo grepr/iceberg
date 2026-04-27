@@ -18,11 +18,14 @@
  */
 package org.apache.iceberg.hadoop;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.function.LongConsumer;
 import java.util.function.LongSupplier;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.GlobalStorageStatistics;
+import org.apache.hadoop.fs.StorageStatistics;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.io.FileIOMetricsContext;
 
@@ -32,9 +35,111 @@ import org.apache.iceberg.io.FileIOMetricsContext;
  */
 public class HadoopMetricsContext implements FileIOMetricsContext {
   public static final String SCHEME = "io.metrics-scheme";
+  public static final String METRICS_ORG_ID = "io.metrics.org-id";
+  public static final String METRICS_JOB_ID = "io.metrics.job-id";
+  public static final String METRICS_TABLE_NAME = "io.metrics.table-name";
+
+  private static final ThreadLocal<Integer> SUBTASK_INDEX = new ThreadLocal<>();
+  private static final ThreadLocal<String> RESOLVED_SCHEME = new ThreadLocal<>();
+  private static final ThreadLocal<Map<String, String>> METRICS_PROPERTIES = new ThreadLocal<>();
+
+  /**
+   * Sets the Flink subtask index for the current thread. Called by the Flink source split reader on
+   * the fetcher thread before any I/O occurs.
+   *
+   * @param index the subtask index from SourceReaderContext
+   */
+  public static void setSubtaskIndex(int index) {
+    SUBTASK_INDEX.set(index);
+  }
+
+  /**
+   * Returns the resolved metrics scheme for the current thread, or null if not set.
+   *
+   * @return the resolved scheme string
+   */
+  public static String getResolvedScheme() {
+    return RESOLVED_SCHEME.get();
+  }
+
+  /**
+   * Returns the metrics properties for the current thread, or null if not set.
+   *
+   * @return unmodifiable map of metrics properties
+   */
+  public static Map<String, String> getMetricsProperties() {
+    return METRICS_PROPERTIES.get();
+  }
+
+  /** Clears all thread-local state. Should be called when the split reader closes. */
+  public static void clearThreadLocal() {
+    SUBTASK_INDEX.remove();
+    RESOLVED_SCHEME.remove();
+    METRICS_PROPERTIES.remove();
+  }
 
   private String scheme;
   private transient volatile FileSystem.Statistics statistics;
+
+  /**
+   * Custom StorageStatistics implementation that wraps FileSystem.Statistics.
+   * Unlike FileSystemStorageStatistics, this provides public access to the wrapped Statistics.
+   */
+  private static class IcebergStorageStatistics extends StorageStatistics {
+    private final FileSystem.Statistics statistics;
+
+    IcebergStorageStatistics(String scheme, FileSystem.Statistics stats) {
+      super(scheme);
+      this.statistics = stats;
+    }
+
+    FileSystem.Statistics getStatistics() {
+      return statistics;
+    }
+
+    @Override
+    public java.util.Iterator<LongStatistic> getLongStatistics() {
+      return java.util.Arrays.asList(
+              new LongStatistic("bytesRead", statistics.getBytesRead()),
+              new LongStatistic("bytesWritten", statistics.getBytesWritten()),
+              new LongStatistic("readOps", statistics.getReadOps()),
+              new LongStatistic("largeReadOps", statistics.getLargeReadOps()),
+              new LongStatistic("writeOps", statistics.getWriteOps()))
+          .iterator();
+    }
+
+    @Override
+    public Long getLong(String key) {
+      switch (key) {
+        case "bytesRead":
+          return statistics.getBytesRead();
+        case "bytesWritten":
+          return statistics.getBytesWritten();
+        case "readOps":
+          return (long) statistics.getReadOps();
+        case "largeReadOps":
+          return (long) statistics.getLargeReadOps();
+        case "writeOps":
+          return (long) statistics.getWriteOps();
+        default:
+          return null;
+      }
+    }
+
+    @Override
+    public boolean isTracked(String key) {
+      return "bytesRead".equals(key)
+          || "bytesWritten".equals(key)
+          || "readOps".equals(key)
+          || "largeReadOps".equals(key)
+          || "writeOps".equals(key);
+    }
+
+    @Override
+    public void reset() {
+      statistics.reset();
+    }
+  }
 
   public HadoopMetricsContext(String scheme) {
     ValidationException.check(
@@ -45,10 +150,34 @@ public class HadoopMetricsContext implements FileIOMetricsContext {
 
   @Override
   public void initialize(Map<String, String> properties) {
-    // FileIO has no specific implementation class, but Hadoop will
-    // still track and report for the provided scheme.
-    this.scheme = properties.getOrDefault(SCHEME, scheme);
-    this.statistics = FileSystem.getStatistics(scheme, null);
+    // Build scheme from discrete properties if available, otherwise fall back to io.metrics-scheme.
+    // When org-id, job-id, and table-name properties are present and a subtask index has been set
+    // on the current thread, constructs a per-subtask scheme: "{orgId}-{jobId}-{tableName}-{idx}".
+    String orgId = properties.get(METRICS_ORG_ID);
+    String jobId = properties.get(METRICS_JOB_ID);
+    String tableName = properties.get(METRICS_TABLE_NAME);
+    Integer subtaskIdx = SUBTASK_INDEX.get();
+
+    if (orgId != null && jobId != null && tableName != null && subtaskIdx != null) {
+      this.scheme = orgId + "-" + jobId + "-" + tableName + "-" + subtaskIdx;
+      RESOLVED_SCHEME.set(this.scheme);
+      METRICS_PROPERTIES.set(Collections.unmodifiableMap(properties));
+    } else {
+      this.scheme = properties.getOrDefault(SCHEME, scheme);
+    }
+
+    // Use GlobalStorageStatistics for per-scheme separation.
+    // FileSystem.getStatistics(scheme, null) uses Class as the map key, causing all schemes
+    // to share one Statistics instance. GlobalStorageStatistics is keyed by scheme string.
+    FileSystem.Statistics newStats = new FileSystem.Statistics(this.scheme);
+    StorageStatistics registered =
+        GlobalStorageStatistics.INSTANCE.put(
+            this.scheme, () -> new IcebergStorageStatistics(this.scheme, newStats));
+    if (registered instanceof IcebergStorageStatistics) {
+      this.statistics = ((IcebergStorageStatistics) registered).getStatistics();
+    } else {
+      this.statistics = newStats;
+    }
   }
 
   /**
@@ -162,7 +291,15 @@ public class HadoopMetricsContext implements FileIOMetricsContext {
     if (statistics == null) {
       synchronized (this) {
         if (statistics == null) {
-          this.statistics = FileSystem.getStatistics(scheme, null);
+          FileSystem.Statistics newStats = new FileSystem.Statistics(this.scheme);
+          StorageStatistics registered =
+              GlobalStorageStatistics.INSTANCE.put(
+                  this.scheme, () -> new IcebergStorageStatistics(this.scheme, newStats));
+          if (registered instanceof IcebergStorageStatistics) {
+            this.statistics = ((IcebergStorageStatistics) registered).getStatistics();
+          } else {
+            this.statistics = newStats;
+          }
         }
       }
     }
