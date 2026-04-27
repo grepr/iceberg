@@ -30,9 +30,13 @@ import org.apache.flink.connector.base.source.reader.RecordsWithSplitIds;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitReader;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitsAddition;
 import org.apache.flink.connector.base.source.reader.splitreader.SplitsChange;
+import java.util.Map;
+import org.apache.hadoop.fs.GlobalStorageStatistics;
+import org.apache.hadoop.fs.StorageStatistics;
 import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.flink.source.split.IcebergSourceSplit;
 import org.apache.iceberg.flink.source.split.SerializableComparator;
+import org.apache.iceberg.hadoop.HadoopMetricsContext;
 import org.apache.iceberg.io.CloseableIterator;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Queues;
@@ -75,6 +79,7 @@ class IcebergSourceSplitReader<T> implements SplitReader<RecordAndPosition<T>, I
    */
   @Override
   public RecordsWithSplitIds<RecordAndPosition<T>> fetch() throws IOException {
+    HadoopMetricsContext.setSubtaskIndex(indexOfSubtask);
     metrics.incrementSplitReaderFetchCalls(1);
     if (currentReader == null) {
       IcebergSourceSplit nextSplit = splits.poll();
@@ -127,9 +132,44 @@ class IcebergSourceSplitReader<T> implements SplitReader<RecordAndPosition<T>, I
 
   @Override
   public void close() throws Exception {
+    reportBytesRead();
+
     currentSplitId = null;
     if (currentReader != null) {
       currentReader.close();
+    }
+  }
+
+  /**
+   * Reports bytes read from GlobalStorageStatistics for this subtask's scheme. Called at close time
+   * after all S3 I/O is complete on this fetcher thread.
+   */
+  private void reportBytesRead() {
+    String scheme = HadoopMetricsContext.getResolvedScheme();
+    if (scheme == null) {
+      return;
+    }
+
+    try {
+      Map<String, String> props = HadoopMetricsContext.getMetricsProperties();
+      StorageStatistics stats = GlobalStorageStatistics.INSTANCE.get(scheme);
+      if (stats != null && props != null) {
+        Long bytesRead = stats.getLong("bytesRead");
+        if (bytesRead != null && bytesRead > 0) {
+          LOG.info(
+              "icebergDataScanned orgId={} jobId={} tableName={} bytesRead={} readOps={} subtask={}",
+              props.get(HadoopMetricsContext.METRICS_ORG_ID),
+              props.get(HadoopMetricsContext.METRICS_JOB_ID),
+              props.get(HadoopMetricsContext.METRICS_TABLE_NAME),
+              bytesRead,
+              stats.getLong("readOps"),
+              indexOfSubtask);
+        }
+      }
+    } catch (Exception e) {
+      LOG.warn("Failed to report bytes read for scheme: {}", scheme, e);
+    } finally {
+      HadoopMetricsContext.clearThreadLocal();
     }
   }
 

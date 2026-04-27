@@ -18,6 +18,7 @@
  */
 package org.apache.iceberg.hadoop;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.function.Consumer;
 import java.util.function.LongConsumer;
@@ -34,6 +35,48 @@ import org.apache.iceberg.io.FileIOMetricsContext;
  */
 public class HadoopMetricsContext implements FileIOMetricsContext {
   public static final String SCHEME = "io.metrics-scheme";
+  public static final String METRICS_ORG_ID = "io.metrics.org-id";
+  public static final String METRICS_JOB_ID = "io.metrics.job-id";
+  public static final String METRICS_TABLE_NAME = "io.metrics.table-name";
+
+  private static final ThreadLocal<Integer> SUBTASK_INDEX = new ThreadLocal<>();
+  private static final ThreadLocal<String> RESOLVED_SCHEME = new ThreadLocal<>();
+  private static final ThreadLocal<Map<String, String>> METRICS_PROPERTIES = new ThreadLocal<>();
+
+  /**
+   * Sets the Flink subtask index for the current thread. Called by the Flink source split reader on
+   * the fetcher thread before any I/O occurs.
+   *
+   * @param index the subtask index from SourceReaderContext
+   */
+  public static void setSubtaskIndex(int index) {
+    SUBTASK_INDEX.set(index);
+  }
+
+  /**
+   * Returns the resolved metrics scheme for the current thread, or null if not set.
+   *
+   * @return the resolved scheme string
+   */
+  public static String getResolvedScheme() {
+    return RESOLVED_SCHEME.get();
+  }
+
+  /**
+   * Returns the metrics properties for the current thread, or null if not set.
+   *
+   * @return unmodifiable map of metrics properties
+   */
+  public static Map<String, String> getMetricsProperties() {
+    return METRICS_PROPERTIES.get();
+  }
+
+  /** Clears all thread-local state. Should be called when the split reader closes. */
+  public static void clearThreadLocal() {
+    SUBTASK_INDEX.remove();
+    RESOLVED_SCHEME.remove();
+    METRICS_PROPERTIES.remove();
+  }
 
   private String scheme;
   private transient volatile FileSystem.Statistics statistics;
@@ -107,10 +150,25 @@ public class HadoopMetricsContext implements FileIOMetricsContext {
 
   @Override
   public void initialize(Map<String, String> properties) {
+    // Build scheme from discrete properties if available, otherwise fall back to io.metrics-scheme.
+    // When org-id, job-id, and table-name properties are present and a subtask index has been set
+    // on the current thread, constructs a per-subtask scheme: "{orgId}-{jobId}-{tableName}-{idx}".
+    String orgId = properties.get(METRICS_ORG_ID);
+    String jobId = properties.get(METRICS_JOB_ID);
+    String tableName = properties.get(METRICS_TABLE_NAME);
+    Integer subtaskIdx = SUBTASK_INDEX.get();
+
+    if (orgId != null && jobId != null && tableName != null && subtaskIdx != null) {
+      this.scheme = orgId + "-" + jobId + "-" + tableName + "-" + subtaskIdx;
+      RESOLVED_SCHEME.set(this.scheme);
+      METRICS_PROPERTIES.set(Collections.unmodifiableMap(properties));
+    } else {
+      this.scheme = properties.getOrDefault(SCHEME, scheme);
+    }
+
     // Use GlobalStorageStatistics for per-scheme separation.
     // FileSystem.getStatistics(scheme, null) uses Class as the map key, causing all schemes
     // to share one Statistics instance. GlobalStorageStatistics is keyed by scheme string.
-    this.scheme = properties.getOrDefault(SCHEME, scheme);
     FileSystem.Statistics newStats = new FileSystem.Statistics(this.scheme);
     StorageStatistics registered =
         GlobalStorageStatistics.INSTANCE.put(
