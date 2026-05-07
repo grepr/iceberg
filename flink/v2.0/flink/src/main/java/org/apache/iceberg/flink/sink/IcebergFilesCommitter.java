@@ -150,6 +150,14 @@ class IcebergFilesCommitter extends AbstractStreamOperator<Void>
     // Open the table loader and load the table.
     this.tableLoader.open();
     this.table = tableLoader.loadTable();
+    // Force a fresh metadata fetch. Grepr's GreprCachingCatalog returns a cached BaseTable
+    // whose underlying TableOperations may carry shouldRefresh=false from a prior background
+    // refresh, missing commits made on a different TaskManager since that refresh. The
+    // SinkUtil.getMaxCommittedCheckpointId call below relies on seeing those commits to take
+    // the SKIP branch when restoring from a savepoint that was committed elsewhere — without
+    // this refresh, it walks stale snapshot history and tries to read a Flink-temp manifest
+    // the previous job has already committed and deleted.
+    this.table.refresh();
     this.committerMetrics = new IcebergFilesCommitterMetrics(super.metrics, table.name());
 
     maxContinuousEmptyCommits =
