@@ -274,6 +274,11 @@ public class LockManagers {
 
     @Override
     public void close() throws Exception {
+      // Catalogs share the default manager, so one catalog must not clear another's active locks.
+      if (this == LOCK_MANAGER_DEFAULT) {
+        return;
+      }
+
       HEARTBEATS.values().forEach(future -> future.cancel(false));
       HEARTBEATS.clear();
       LOCKS.clear();
