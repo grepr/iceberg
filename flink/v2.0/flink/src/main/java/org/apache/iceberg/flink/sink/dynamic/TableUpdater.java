@@ -149,6 +149,7 @@ class TableUpdater {
   private TableMetadataCache.ResolvedSchemaInfo evolveSchema(
       TableIdentifier identifier, Schema schema) {
     Table table = catalog.loadTable(identifier);
+    table.refresh();
     Schema tableSchema = table.schema();
     CompareSchemasVisitor.Result result =
         CompareSchemasVisitor.visit(schema, tableSchema, caseSensitive, dropUnusedColumns);
@@ -210,6 +211,7 @@ class TableUpdater {
 
   private PartitionSpec evolveSpec(TableIdentifier identifier, PartitionSpec targetSpec) {
     Table table = catalog.loadTable(identifier);
+    table.refresh();
     PartitionSpec currentSpec = table.spec();
 
     PartitionSpecEvolution.PartitionSpecChanges result =

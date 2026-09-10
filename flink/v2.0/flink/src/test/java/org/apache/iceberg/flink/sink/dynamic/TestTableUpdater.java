@@ -361,7 +361,7 @@ public class TestTableUpdater extends TestFlinkIcebergSinkBase {
   void testSchemaUpdateRetriesAfterLosingToADisjointColumn() {
     InMemoryCatalog catalog = catalogWithTable();
     TableIdentifier identifier = TableIdentifier.parse("myNamespace.myTable");
-    Catalog conflicting = conflictingCatalog(catalog, identifier, 1);
+    Catalog conflicting = cachingCatalog(conflictingCatalog(catalog, identifier, 1), identifier);
 
     Tuple2<TableMetadataCache.ResolvedSchemaInfo, PartitionSpec> result =
         tableUpdater(conflicting)
@@ -416,13 +416,11 @@ public class TestTableUpdater extends TestFlinkIcebergSinkBase {
   void testSpecUpdateRetriesAfterLosingToAConcurrentCommit() {
     InMemoryCatalog catalog = catalogWithTable();
     TableIdentifier identifier = TableIdentifier.parse("myNamespace.myTable");
-    Catalog conflicting = specConflictingCatalog(catalog, identifier, 1);
+    Catalog conflicting =
+        cachingCatalog(specConflictingCatalog(catalog, identifier, 1), identifier);
     PartitionSpec targetSpec = PartitionSpec.builderFor(SCHEMA).bucket("data", 10).build();
     PartitionSpec expectedSpec =
-        PartitionSpec.builderFor(SCHEMA)
-            .withSpecId(1)
-            .bucket("data", 10, "data_bucket_10")
-            .build();
+        PartitionSpec.builderFor(SCHEMA).withSpecId(1).bucket("data", 10, "data_bucket_10").build();
 
     PartitionSpec result =
         tableUpdater(conflicting)
@@ -573,6 +571,24 @@ public class TestTableUpdater extends TestFlinkIcebergSinkBase {
                           return updated == update ? updateProxy : updated;
                         });
                   });
+            });
+  }
+
+  /** Wraps a catalog so every load of the test table returns the same retained table handle. */
+  private static Catalog cachingCatalog(Catalog delegate, TableIdentifier identifier) {
+    Table cachedTable = delegate.loadTable(identifier);
+    return (Catalog)
+        Proxy.newProxyInstance(
+            TestTableUpdater.class.getClassLoader(),
+            new Class<?>[] {Catalog.class, SupportsNamespaces.class},
+            (catalogProxy, catalogMethod, catalogArgs) -> {
+              if ("loadTable".equals(catalogMethod.getName())
+                  && identifier.equals(catalogArgs[0])) {
+                return cachedTable;
+              }
+
+              Object result = invoke(delegate, catalogMethod, catalogArgs);
+              return result == delegate ? catalogProxy : result;
             });
   }
 
