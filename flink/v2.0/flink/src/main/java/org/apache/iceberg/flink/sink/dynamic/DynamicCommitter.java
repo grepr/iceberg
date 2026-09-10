@@ -395,6 +395,10 @@ class DynamicCommitter implements Committer<DynamicCommittable> {
 
   @Override
   public void close() throws IOException {
-    workerPool.shutdown();
+    try {
+      workerPool.shutdown();
+    } finally {
+      DynamicSinkUtil.closeCatalog(catalog);
+    }
   }
 }

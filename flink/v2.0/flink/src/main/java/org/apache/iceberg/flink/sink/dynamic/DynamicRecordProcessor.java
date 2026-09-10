@@ -54,6 +54,7 @@ class DynamicRecordProcessor<T> extends ProcessFunction<T, DynamicRecordInternal
   private final TableCreator tableCreator;
   private final boolean caseSensitive;
 
+  private transient Catalog catalog;
   private transient TableMetadataCache tableCache;
   private transient HashKeyGenerator hashKeyGenerator;
   private transient TableUpdater updater;
@@ -86,7 +87,7 @@ class DynamicRecordProcessor<T> extends ProcessFunction<T, DynamicRecordInternal
   @Override
   public void open(OpenContext openContext) throws Exception {
     super.open(openContext);
-    Catalog catalog = catalogLoader.loadCatalog();
+    this.catalog = catalogLoader.loadCatalog();
     this.tableCache =
         new TableMetadataCache(
             catalog,
@@ -114,7 +115,7 @@ class DynamicRecordProcessor<T> extends ProcessFunction<T, DynamicRecordInternal
 
     this.dynamicRecordWithConfig =
         new DynamicRecordWithConfig(new FlinkWriteConf(writeProperties, flinkConfig));
-    generator.open(openContext);
+    generator.open(openContext, catalog);
   }
 
   @Override
@@ -218,10 +219,30 @@ class DynamicRecordProcessor<T> extends ProcessFunction<T, DynamicRecordInternal
 
   @Override
   public void close() {
+    // Collector#close() forbids checked exceptions, so failures are wrapped. Every stage runs even
+    // if an earlier one fails, so the catalog is released on the failure path too.
     try {
-      super.close();
+      generator.close();
     } catch (Exception e) {
       throw new RuntimeException(e);
+    } finally {
+      closeProcessorAndCatalogUnchecked();
+    }
+  }
+
+  private void closeProcessorAndCatalogUnchecked() {
+    try {
+      closeProcessorAndCatalog();
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private void closeProcessorAndCatalog() throws Exception {
+    try {
+      super.close();
+    } finally {
+      DynamicSinkUtil.closeCatalog(catalog);
     }
   }
 }

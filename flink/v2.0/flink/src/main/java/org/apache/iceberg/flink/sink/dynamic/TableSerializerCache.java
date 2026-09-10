@@ -18,7 +18,9 @@
  */
 package org.apache.iceberg.flink.sink.dynamic;
 
+import java.io.IOException;
 import java.io.Serializable;
+import java.io.UncheckedIOException;
 import java.util.Map;
 import javax.annotation.Nullable;
 import org.apache.flink.annotation.Internal;
@@ -28,6 +30,7 @@ import org.apache.flink.table.runtime.typeutils.RowDataSerializer;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.flink.CatalogLoader;
 import org.apache.iceberg.flink.FlinkSchemaUtil;
@@ -119,10 +122,32 @@ class TableSerializerCache implements Serializable {
       this.specs = Maps.newHashMapWithExpectedSize(0);
     }
 
+    /**
+     * Reloads the table's schemas and specs. This cache lives inside a {@link
+     * org.apache.flink.api.common.typeutils.TypeSerializer}, which has no lifecycle hook to release
+     * a long-lived catalog, so the catalog opened here is closed before returning; the reloaded
+     * maps do not read from it again.
+     */
     private void update() {
-      Table table = catalogLoader.loadCatalog().loadTable(TableIdentifier.parse(tableName));
-      schemas = table.schemas();
-      specs = table.specs();
+      Catalog catalog = catalogLoader.loadCatalog();
+      try {
+        Table table = catalog.loadTable(TableIdentifier.parse(tableName));
+        schemas = table.schemas();
+        specs = table.specs();
+      } catch (RuntimeException | Error e) {
+        try {
+          DynamicSinkUtil.closeCatalog(catalog);
+        } catch (IOException closeFailure) {
+          e.addSuppressed(closeFailure);
+        }
+        throw e;
+      }
+
+      try {
+        DynamicSinkUtil.closeCatalog(catalog);
+      } catch (IOException e) {
+        throw new UncheckedIOException("Failed to close the catalog for table " + tableName, e);
+      }
     }
   }
 

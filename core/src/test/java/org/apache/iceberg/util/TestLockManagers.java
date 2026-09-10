@@ -21,6 +21,7 @@ package org.apache.iceberg.util;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.Map;
+import java.util.UUID;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.LockManager;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
@@ -39,6 +40,21 @@ public class TestLockManagers {
     Map<String, String> properties = Maps.newHashMap();
     properties.put(CatalogProperties.LOCK_IMPL, CustomLockManager.class.getName());
     assertThat(LockManagers.from(properties)).isInstanceOf(CustomLockManager.class);
+  }
+
+  @Test
+  public void testClosingDefaultLockManagerDoesNotReleaseSharedLocks() throws Exception {
+    LockManager first = LockManagers.from(Map.of());
+    LockManager second = LockManagers.from(Map.of());
+    String entityId = UUID.randomUUID().toString();
+    String ownerId = UUID.randomUUID().toString();
+
+    assertThat(second).isSameAs(first);
+    assertThat(first.acquire(entityId, ownerId)).isTrue();
+
+    second.close();
+
+    assertThat(first.release(entityId, ownerId)).isTrue();
   }
 
   static class CustomLockManager implements LockManager {

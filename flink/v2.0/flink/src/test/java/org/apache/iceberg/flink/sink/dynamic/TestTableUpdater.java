@@ -19,18 +19,26 @@
 package org.apache.iceberg.flink.sink.dynamic;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.UpdatePartitionSpec;
+import org.apache.iceberg.UpdateSchema;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.SupportsNamespaces;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.flink.sink.TestFlinkIcebergSinkBase;
 import org.apache.iceberg.inmemory.InMemoryCatalog;
 import org.apache.iceberg.types.Types;
@@ -342,5 +350,259 @@ public class TestTableUpdater extends TestFlinkIcebergSinkBase {
     assertThat(catalog.tableExists(tableIdentifier)).isTrue();
     assertThat(result.f0.resolvedTableSchema().sameSchema(SCHEMA)).isTrue();
     assertThat(result.f0.compareResult()).isEqualTo(CompareSchemasVisitor.Result.SAME);
+  }
+
+  /**
+   * Two writers adding disjoint columns at the same time: the loser's commit fails, and the
+   * concurrent schema does not cover what it asked for, so reloading alone cannot satisfy it. It
+   * has to evolve again against the new metadata, and both columns end up on the table.
+   */
+  @Test
+  void testSchemaUpdateRetriesAfterLosingToADisjointColumn() {
+    InMemoryCatalog catalog = catalogWithTable();
+    TableIdentifier identifier = TableIdentifier.parse("myNamespace.myTable");
+    Catalog conflicting = cachingCatalog(conflictingCatalog(catalog, identifier, 1), identifier);
+
+    Tuple2<TableMetadataCache.ResolvedSchemaInfo, PartitionSpec> result =
+        tableUpdater(conflicting)
+            .update(
+                identifier,
+                SnapshotRef.MAIN_BRANCH,
+                SCHEMA2,
+                PartitionSpec.unpartitioned(),
+                TableCreator.DEFAULT);
+
+    // "extra" precedes "concurrent1" because EvolveSchemaVisitor positions the columns it adds
+    // according to the requested schema, which puts "extra" right after "data".
+    assertThat(catalog.loadTable(identifier).schema().columns())
+        .extracting(Types.NestedField::name)
+        .containsExactly("id", "data", "extra", "concurrent1");
+    assertThat(result.f0.resolvedTableSchema().columns())
+        .extracting(Types.NestedField::name)
+        .containsExactly("id", "data", "extra", "concurrent1");
+    assertThat(result.f0.compareResult())
+        .isEqualTo(CompareSchemasVisitor.Result.DATA_CONVERSION_NEEDED);
+  }
+
+  /**
+   * The retry is bounded. A writer that loses every attempt gets the last failure, which fails the
+   * job the way an unretried conflict always did.
+   */
+  @Test
+  void testSchemaUpdateStopsRetryingAndPropagatesTheLastFailure() {
+    InMemoryCatalog catalog = catalogWithTable();
+    TableIdentifier identifier = TableIdentifier.parse("myNamespace.myTable");
+    Catalog alwaysConflicting = conflictingCatalog(catalog, identifier, Integer.MAX_VALUE);
+    TableUpdater tableUpdater = tableUpdater(alwaysConflicting);
+
+    assertThatThrownBy(
+            () ->
+                tableUpdater.update(
+                    identifier,
+                    SnapshotRef.MAIN_BRANCH,
+                    SCHEMA2,
+                    PartitionSpec.unpartitioned(),
+                    TableCreator.DEFAULT))
+        .isInstanceOf(CommitFailedException.class)
+        .hasMessageContaining("Cannot commit");
+
+    // The first attempt plus its retries, each losing to a concurrent column of its own.
+    assertThat(catalog.loadTable(identifier).schema().columns())
+        .extracting(Types.NestedField::name)
+        .containsExactly("id", "data", "concurrent1", "concurrent2", "concurrent3", "concurrent4");
+  }
+
+  @Test
+  void testSpecUpdateRetriesAfterLosingToAConcurrentCommit() {
+    InMemoryCatalog catalog = catalogWithTable();
+    TableIdentifier identifier = TableIdentifier.parse("myNamespace.myTable");
+    Catalog conflicting =
+        cachingCatalog(specConflictingCatalog(catalog, identifier, 1), identifier);
+    PartitionSpec targetSpec = PartitionSpec.builderFor(SCHEMA).bucket("data", 10).build();
+    PartitionSpec expectedSpec =
+        PartitionSpec.builderFor(SCHEMA).withSpecId(1).bucket("data", 10, "data_bucket_10").build();
+
+    PartitionSpec result =
+        tableUpdater(conflicting)
+            .update(identifier, SnapshotRef.MAIN_BRANCH, SCHEMA, targetSpec, TableCreator.DEFAULT)
+            .f1;
+
+    assertThat(result).isEqualTo(expectedSpec);
+    assertThat(catalog.loadTable(identifier).spec()).isEqualTo(expectedSpec);
+    assertThat(catalog.loadTable(identifier).properties()).containsEntry("conflict", "1");
+  }
+
+  @Test
+  void testSpecUpdateStopsRetryingAndPropagatesTheLastFailure() {
+    InMemoryCatalog catalog = catalogWithTable();
+    TableIdentifier identifier = TableIdentifier.parse("myNamespace.myTable");
+    Catalog alwaysConflicting = specConflictingCatalog(catalog, identifier, Integer.MAX_VALUE);
+    PartitionSpec targetSpec = PartitionSpec.builderFor(SCHEMA).bucket("data", 10).build();
+
+    assertThatThrownBy(
+            () ->
+                tableUpdater(alwaysConflicting)
+                    .update(
+                        identifier,
+                        SnapshotRef.MAIN_BRANCH,
+                        SCHEMA,
+                        targetSpec,
+                        TableCreator.DEFAULT))
+        .isInstanceOf(CommitFailedException.class)
+        .hasMessageContaining("Cannot commit");
+
+    assertThat(catalog.loadTable(identifier).spec()).isEqualTo(PartitionSpec.unpartitioned());
+    assertThat(catalog.loadTable(identifier).properties()).containsEntry("conflict", "4");
+  }
+
+  private static InMemoryCatalog catalogWithTable() {
+    InMemoryCatalog catalog = new InMemoryCatalog();
+    catalog.initialize("catalog", Map.of());
+    catalog.createNamespace(Namespace.of("myNamespace"));
+    catalog.createTable(TableIdentifier.parse("myNamespace.myTable"), SCHEMA);
+    return catalog;
+  }
+
+  private static TableUpdater tableUpdater(Catalog catalog) {
+    return new TableUpdater(
+        new TableMetadataCache(catalog, 10, Long.MAX_VALUE, 10, CASE_SENSITIVE, PRESERVE_COLUMNS),
+        catalog,
+        CASE_SENSITIVE,
+        PRESERVE_COLUMNS);
+  }
+
+  /**
+   * Wraps a catalog so that each of the first {@code conflicts} schema commits loses a pointer
+   * race: immediately before the commit reaches the delegate, another writer adds a column of its
+   * own through a freshly loaded handle, which leaves this commit on stale base metadata.
+   */
+  private static Catalog conflictingCatalog(
+      Catalog delegate, TableIdentifier identifier, int conflicts) {
+    AtomicInteger remaining = new AtomicInteger(conflicts);
+    return (Catalog)
+        Proxy.newProxyInstance(
+            TestTableUpdater.class.getClassLoader(),
+            new Class<?>[] {Catalog.class, SupportsNamespaces.class},
+            (catalogProxy, catalogMethod, catalogArgs) -> {
+              Object loaded = invoke(delegate, catalogMethod, catalogArgs);
+              if (!"loadTable".equals(catalogMethod.getName())) {
+                return loaded == delegate ? catalogProxy : loaded;
+              }
+
+              Table table = (Table) loaded;
+              return Proxy.newProxyInstance(
+                  TestTableUpdater.class.getClassLoader(),
+                  new Class<?>[] {Table.class},
+                  (tableProxy, tableMethod, tableArgs) -> {
+                    Object updateApi = invoke(table, tableMethod, tableArgs);
+                    if (!"updateSchema".equals(tableMethod.getName())) {
+                      return updateApi == table ? tableProxy : updateApi;
+                    }
+
+                    UpdateSchema update = (UpdateSchema) updateApi;
+                    return Proxy.newProxyInstance(
+                        TestTableUpdater.class.getClassLoader(),
+                        new Class<?>[] {UpdateSchema.class},
+                        (updateProxy, updateMethod, updateArgs) -> {
+                          if ("commit".equals(updateMethod.getName())) {
+                            int attempt = remaining.getAndDecrement();
+                            if (attempt > 0) {
+                              delegate
+                                  .loadTable(identifier)
+                                  .updateSchema()
+                                  .addColumn(
+                                      "concurrent" + (conflicts - attempt + 1),
+                                      Types.StringType.get())
+                                  .commit();
+                            }
+                          }
+
+                          Object updated = invoke(update, updateMethod, updateArgs);
+                          return updated == update ? updateProxy : updated;
+                        });
+                  });
+            });
+  }
+
+  /**
+   * Wraps a catalog so that each of the first {@code conflicts} partition-spec commits loses a
+   * pointer race to a table-property commit through a freshly loaded handle.
+   */
+  private static Catalog specConflictingCatalog(
+      Catalog delegate, TableIdentifier identifier, int conflicts) {
+    AtomicInteger remaining = new AtomicInteger(conflicts);
+    return (Catalog)
+        Proxy.newProxyInstance(
+            TestTableUpdater.class.getClassLoader(),
+            new Class<?>[] {Catalog.class, SupportsNamespaces.class},
+            (catalogProxy, catalogMethod, catalogArgs) -> {
+              Object loaded = invoke(delegate, catalogMethod, catalogArgs);
+              if (!"loadTable".equals(catalogMethod.getName())) {
+                return loaded == delegate ? catalogProxy : loaded;
+              }
+
+              Table table = (Table) loaded;
+              return Proxy.newProxyInstance(
+                  TestTableUpdater.class.getClassLoader(),
+                  new Class<?>[] {Table.class},
+                  (tableProxy, tableMethod, tableArgs) -> {
+                    Object updateApi = invoke(table, tableMethod, tableArgs);
+                    if (!"updateSpec".equals(tableMethod.getName())) {
+                      return updateApi == table ? tableProxy : updateApi;
+                    }
+
+                    UpdatePartitionSpec update = (UpdatePartitionSpec) updateApi;
+                    return Proxy.newProxyInstance(
+                        TestTableUpdater.class.getClassLoader(),
+                        new Class<?>[] {UpdatePartitionSpec.class},
+                        (updateProxy, updateMethod, updateArgs) -> {
+                          if ("commit".equals(updateMethod.getName())) {
+                            int attempt = remaining.getAndDecrement();
+                            if (attempt > 0) {
+                              delegate
+                                  .loadTable(identifier)
+                                  .updateProperties()
+                                  .set("conflict", String.valueOf(conflicts - attempt + 1))
+                                  .commit();
+                            }
+                          }
+
+                          Object updated = invoke(update, updateMethod, updateArgs);
+                          return updated == update ? updateProxy : updated;
+                        });
+                  });
+            });
+  }
+
+  /** Wraps a catalog so every load of the test table returns the same retained table handle. */
+  private static Catalog cachingCatalog(Catalog delegate, TableIdentifier identifier) {
+    Table cachedTable = delegate.loadTable(identifier);
+    return (Catalog)
+        Proxy.newProxyInstance(
+            TestTableUpdater.class.getClassLoader(),
+            new Class<?>[] {Catalog.class, SupportsNamespaces.class},
+            (catalogProxy, catalogMethod, catalogArgs) -> {
+              if ("loadTable".equals(catalogMethod.getName())
+                  && identifier.equals(catalogArgs[0])) {
+                return cachedTable;
+              }
+
+              Object result = invoke(delegate, catalogMethod, catalogArgs);
+              return result == delegate ? catalogProxy : result;
+            });
+  }
+
+  private static Object invoke(Object target, Method method, Object[] args) throws Exception {
+    try {
+      return method.invoke(target, args);
+    } catch (InvocationTargetException e) {
+      Throwable cause = e.getCause();
+      if (cause instanceof Exception exception) {
+        throw exception;
+      } else if (cause instanceof Error error) {
+        throw error;
+      }
+      throw new RuntimeException(cause);
+    }
   }
 }

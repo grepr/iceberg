@@ -106,27 +106,33 @@ public class DynamicIcebergSink
 
   @Override
   public SinkWriter<DynamicRecordInternal> createWriter(WriterInitContext context) {
-    return new DynamicWriter(
-        catalogLoader.loadCatalog(),
-        writeProperties,
-        flinkConfig,
-        cacheMaximumSize,
-        new DynamicWriterMetrics(context.metricGroup()),
-        context.getTaskInfo().getIndexOfThisSubtask(),
-        context.getTaskInfo().getAttemptNumber());
+    return DynamicSinkUtil.createWithCatalog(
+        catalogLoader,
+        catalog ->
+            new DynamicWriter(
+                catalog,
+                writeProperties,
+                flinkConfig,
+                cacheMaximumSize,
+                new DynamicWriterMetrics(context.metricGroup()),
+                context.getTaskInfo().getIndexOfThisSubtask(),
+                context.getTaskInfo().getAttemptNumber()));
   }
 
   @Override
   public Committer<DynamicCommittable> createCommitter(CommitterInitContext context) {
     FlinkWriteConf flinkWriteConf = new FlinkWriteConf(writeProperties, flinkConfig);
     DynamicCommitterMetrics metrics = new DynamicCommitterMetrics(context.metricGroup());
-    return new DynamicCommitter(
-        catalogLoader.loadCatalog(),
-        snapshotProperties,
-        flinkWriteConf.overwriteMode(),
-        flinkWriteConf.workerPoolSize(),
-        sinkId,
-        metrics);
+    return DynamicSinkUtil.createWithCatalog(
+        catalogLoader,
+        catalog ->
+            new DynamicCommitter(
+                catalog,
+                snapshotProperties,
+                flinkWriteConf.overwriteMode(),
+                flinkWriteConf.workerPoolSize(),
+                sinkId,
+                metrics));
   }
 
   @Override
@@ -204,14 +210,17 @@ public class DynamicIcebergSink
 
     @Override
     public SinkWriter<DynamicRecordInternal> createWriter(WriterInitContext context) {
-      return new DynamicWriter(
-          catalogLoader.loadCatalog(),
-          writeProperties,
-          flinkConfig,
-          cacheMaximumSize,
-          new DynamicWriterMetrics(context.metricGroup()),
-          context.getTaskInfo().getIndexOfThisSubtask(),
-          context.getTaskInfo().getAttemptNumber());
+      return DynamicSinkUtil.createWithCatalog(
+          catalogLoader,
+          catalog ->
+              new DynamicWriter(
+                  catalog,
+                  writeProperties,
+                  flinkConfig,
+                  cacheMaximumSize,
+                  new DynamicWriterMetrics(context.metricGroup()),
+                  context.getTaskInfo().getIndexOfThisSubtask(),
+                  context.getTaskInfo().getAttemptNumber()));
     }
 
     @Override
