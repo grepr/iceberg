@@ -21,14 +21,27 @@ package org.apache.iceberg.flink.sink.dynamic;
 import java.io.Serializable;
 import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.util.Collector;
+import org.apache.iceberg.catalog.Catalog;
 
 /** A generator to yield {@link DynamicRecord} from the provided input. */
 public interface DynamicRecordGenerator<T> extends Serializable {
-  default void open(OpenContext openContext) throws Exception {}
+
+  /**
+   * Initializes the generator.
+   *
+   * @param openContext the Flink open context of the operator hosting the generator
+   * @param catalog the catalog the hosting operator opened for its own metadata lookups. A
+   *     generator needing catalog access should use this one rather than loading another, and must
+   *     not close it: the hosting operator owns it and closes it after {@link #close()}.
+   */
+  default void open(OpenContext openContext, Catalog catalog) throws Exception {}
 
   /**
    * Takes the user-defined input and yields zero, one, or multiple {@link DynamicRecord}s using the
    * {@link Collector}.
    */
   void generate(T inputRecord, Collector<DynamicRecord> out) throws Exception;
+
+  /** Releases the resources held by the generator. Called when the hosting operator is closed. */
+  default void close() throws Exception {}
 }

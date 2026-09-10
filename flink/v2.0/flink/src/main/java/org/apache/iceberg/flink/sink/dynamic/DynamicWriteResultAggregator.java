@@ -89,6 +89,15 @@ class DynamicWriteResultAggregator
   }
 
   @Override
+  public void close() throws Exception {
+    try {
+      super.close();
+    } finally {
+      DynamicSinkUtil.closeCatalog(catalog);
+    }
+  }
+
+  @Override
   public void finish() throws IOException {
     prepareSnapshotPreBarrier(Long.MAX_VALUE);
   }

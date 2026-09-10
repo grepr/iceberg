@@ -45,6 +45,7 @@ class DynamicTableUpdateOperator
   private final TableCreator tableCreator;
   private final boolean caseSensitive;
 
+  private transient Catalog catalog;
   private transient TableUpdater updater;
 
   DynamicTableUpdateOperator(
@@ -62,7 +63,7 @@ class DynamicTableUpdateOperator
   @Override
   public void open(OpenContext openContext) throws Exception {
     super.open(openContext);
-    Catalog catalog = catalogLoader.loadCatalog();
+    this.catalog = catalogLoader.loadCatalog();
     this.updater =
         new TableUpdater(
             new TableMetadataCache(
@@ -75,6 +76,15 @@ class DynamicTableUpdateOperator
             catalog,
             caseSensitive,
             dropUnusedColumns);
+  }
+
+  @Override
+  public void close() throws Exception {
+    try {
+      super.close();
+    } finally {
+      DynamicSinkUtil.closeCatalog(catalog);
+    }
   }
 
   @Override

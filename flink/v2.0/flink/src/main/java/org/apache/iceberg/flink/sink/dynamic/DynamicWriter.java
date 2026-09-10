@@ -156,8 +156,12 @@ class DynamicWriter implements CommittingSinkWriter<DynamicRecordInternal, Dynam
 
   @Override
   public void close() throws Exception {
-    for (TaskWriter<RowData> writer : writers.values()) {
-      writer.close();
+    try {
+      for (TaskWriter<RowData> writer : writers.values()) {
+        writer.close();
+      }
+    } finally {
+      DynamicSinkUtil.closeCatalog(catalog);
     }
   }
 

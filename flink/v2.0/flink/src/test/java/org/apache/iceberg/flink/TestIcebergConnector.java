@@ -435,7 +435,8 @@ public class TestIcebergConnector extends TestBase {
     }
 
     @Override
-    public void open(OpenContext openContext) throws Exception {
+    public void open(OpenContext openContext, org.apache.iceberg.catalog.Catalog catalog)
+        throws Exception {
       String[] fieldNames = rowType().getFieldNames().toArray(new String[0]);
 
       for (int i = 0; i < fieldNames.length; i++) {

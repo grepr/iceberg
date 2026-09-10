@@ -18,6 +18,8 @@
  */
 package org.apache.iceberg.flink.sink.dynamic;
 
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
@@ -33,6 +35,7 @@ import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.flink.FlinkSchemaUtil;
+import org.apache.iceberg.util.Tasks;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,6 +44,18 @@ import org.slf4j.LoggerFactory;
 class TableUpdater {
 
   private static final Logger LOG = LoggerFactory.getLogger(TableUpdater.class);
+
+  /**
+   * Retry budget for a metadata commit which lost the pointer race. Kept small and bounded: this
+   * runs on the record path, so the subtask is blocked while it backs off.
+   */
+  private static final int COMMIT_CONFLICT_RETRIES = 3;
+
+  private static final long MIN_RETRY_WAIT_MS = 100;
+  private static final long MAX_RETRY_WAIT_MS = 2_000;
+  private static final long TOTAL_RETRY_TIME_MS = 10_000;
+  private static final double RETRY_SCALE_FACTOR = 2.0;
+
   private final TableMetadataCache cache;
   private final Catalog catalog;
   private final boolean caseSensitive;
@@ -126,53 +141,61 @@ class TableUpdater {
     TableMetadataCache.ResolvedSchemaInfo fromCache = cache.schema(identifier, schema);
     if (fromCache.compareResult() != CompareSchemasVisitor.Result.SCHEMA_UPDATE_NEEDED) {
       return fromCache;
-    } else {
-      Table table = catalog.loadTable(identifier);
-      Schema tableSchema = table.schema();
-      CompareSchemasVisitor.Result result =
-          CompareSchemasVisitor.visit(schema, tableSchema, caseSensitive, dropUnusedColumns);
-      switch (result) {
-        case SAME:
-          cache.update(identifier, table);
-          return new TableMetadataCache.ResolvedSchemaInfo(
-              tableSchema, result, DataConverter.identity());
-        case DATA_CONVERSION_NEEDED:
-          cache.update(identifier, table);
-          return new TableMetadataCache.ResolvedSchemaInfo(
-              tableSchema,
-              result,
-              DataConverter.get(
-                  FlinkSchemaUtil.convert(schema), FlinkSchemaUtil.convert(tableSchema)));
-        case SCHEMA_UPDATE_NEEDED:
-          LOG.info(
-              "Triggering schema update for table {} {} to {}", identifier, tableSchema, schema);
-          UpdateSchema updateApi = table.updateSchema();
-          EvolveSchemaVisitor.visit(
-              identifier, updateApi, tableSchema, schema, caseSensitive, dropUnusedColumns);
+    }
 
-          try {
-            updateApi.commit();
-            cache.update(identifier, table);
-            TableMetadataCache.ResolvedSchemaInfo comparisonAfterMigration =
-                cache.schema(identifier, schema);
-            Schema newSchema = comparisonAfterMigration.resolvedTableSchema();
-            LOG.info("Table {} schema updated from {} to {}", identifier, tableSchema, newSchema);
-            return comparisonAfterMigration;
-          } catch (CommitFailedException e) {
-            cache.invalidate(identifier);
-            TableMetadataCache.ResolvedSchemaInfo newSchema = cache.schema(identifier, schema);
-            if (newSchema.compareResult() != CompareSchemasVisitor.Result.SCHEMA_UPDATE_NEEDED) {
-              LOG.debug("Table {} schema updated concurrently to {}", identifier, schema);
-              return newSchema;
-            } else {
-              LOG.error(
-                  "Schema update failed for {} from {} to {}", identifier, tableSchema, schema, e);
-              throw e;
-            }
+    return retryOnCommitConflict(identifier, id -> evolveSchema(id, schema));
+  }
+
+  private TableMetadataCache.ResolvedSchemaInfo evolveSchema(
+      TableIdentifier identifier, Schema schema) {
+    Table table = catalog.loadTable(identifier);
+    Schema tableSchema = table.schema();
+    CompareSchemasVisitor.Result result =
+        CompareSchemasVisitor.visit(schema, tableSchema, caseSensitive, dropUnusedColumns);
+    switch (result) {
+      case SAME:
+        cache.update(identifier, table);
+        return new TableMetadataCache.ResolvedSchemaInfo(
+            tableSchema, result, DataConverter.identity());
+      case DATA_CONVERSION_NEEDED:
+        cache.update(identifier, table);
+        return new TableMetadataCache.ResolvedSchemaInfo(
+            tableSchema,
+            result,
+            DataConverter.get(
+                FlinkSchemaUtil.convert(schema), FlinkSchemaUtil.convert(tableSchema)));
+      case SCHEMA_UPDATE_NEEDED:
+        LOG.info("Triggering schema update for table {} {} to {}", identifier, tableSchema, schema);
+        UpdateSchema updateApi = table.updateSchema();
+        EvolveSchemaVisitor.visit(
+            identifier, updateApi, tableSchema, schema, caseSensitive, dropUnusedColumns);
+
+        try {
+          updateApi.commit();
+          cache.update(identifier, table);
+          TableMetadataCache.ResolvedSchemaInfo comparisonAfterMigration =
+              cache.schema(identifier, schema);
+          Schema newSchema = comparisonAfterMigration.resolvedTableSchema();
+          LOG.info("Table {} schema updated from {} to {}", identifier, tableSchema, newSchema);
+          return comparisonAfterMigration;
+        } catch (CommitFailedException e) {
+          cache.invalidate(identifier);
+          TableMetadataCache.ResolvedSchemaInfo newSchema = cache.schema(identifier, schema);
+          if (newSchema.compareResult() != CompareSchemasVisitor.Result.SCHEMA_UPDATE_NEEDED) {
+            LOG.debug("Table {} schema updated concurrently to {}", identifier, schema);
+            return newSchema;
+          } else {
+            LOG.warn(
+                "Schema update for {} from {} to {} lost the commit race",
+                identifier,
+                tableSchema,
+                schema,
+                e);
+            throw e;
           }
-        default:
-          throw new IllegalArgumentException("Unknown comparison result");
-      }
+        }
+      default:
+        throw new IllegalArgumentException("Unknown comparison result");
     }
   }
 
@@ -182,8 +205,12 @@ class TableUpdater {
       return currentSpec;
     }
 
+    return retryOnCommitConflict(identifier, id -> evolveSpec(id, targetSpec));
+  }
+
+  private PartitionSpec evolveSpec(TableIdentifier identifier, PartitionSpec targetSpec) {
     Table table = catalog.loadTable(identifier);
-    currentSpec = table.spec();
+    PartitionSpec currentSpec = table.spec();
 
     PartitionSpecEvolution.PartitionSpecChanges result =
         PartitionSpecEvolution.evolve(currentSpec, targetSpec);
@@ -212,8 +239,8 @@ class TableUpdater {
         LOG.debug("Table {} partition spec updated concurrently to {}", identifier, newSpec);
         return newSpec;
       } else {
-        LOG.error(
-            "Partition spec update failed for {} from {} to {}",
+        LOG.warn(
+            "Partition spec update for {} from {} to {} lost the commit race",
             identifier,
             currentSpec,
             targetSpec,
@@ -222,5 +249,25 @@ class TableUpdater {
       }
     }
     return cache.spec(identifier, targetSpec);
+  }
+
+  /**
+   * Runs one metadata-evolution attempt, repeating it against freshly loaded metadata while the
+   * commit keeps losing the pointer race. A concurrent commit which already covers what this
+   * attempt wanted returns from the attempt itself; a concurrent commit which does not — two
+   * writers introducing disjoint columns, or a table-property commit landing between the load and
+   * the commit — leaves the update still needed, and re-evolving on the new metadata is what makes
+   * progress. The exception from the final attempt propagates.
+   */
+  private static <T> T retryOnCommitConflict(
+      TableIdentifier identifier, Function<TableIdentifier, T> attempt) {
+    AtomicReference<T> result = new AtomicReference<>();
+    Tasks.foreach(identifier)
+        .retry(COMMIT_CONFLICT_RETRIES)
+        .onlyRetryOn(CommitFailedException.class)
+        .exponentialBackoff(
+            MIN_RETRY_WAIT_MS, MAX_RETRY_WAIT_MS, TOTAL_RETRY_TIME_MS, RETRY_SCALE_FACTOR)
+        .run(id -> result.set(attempt.apply(id)));
+    return result.get();
   }
 }

@@ -18,9 +18,12 @@
  */
 package org.apache.iceberg.flink.sink.dynamic;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.util.Collections;
 import java.util.Set;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.types.Types;
@@ -28,6 +31,18 @@ import org.apache.iceberg.types.Types;
 class DynamicSinkUtil {
 
   private DynamicSinkUtil() {}
+
+  /**
+   * Closes a catalog loaded by one of the sink's operators. Catalogs are not required to be {@link
+   * Closeable}, but those which are hold client pools, HTTP connections, or metastore clients which
+   * live for the lifetime of the TaskManager JVM unless they are closed. Tolerates a {@code null}
+   * catalog so it can be called from a {@code close()} which may run after a failed {@code open()}.
+   */
+  static void closeCatalog(Catalog catalog) throws IOException {
+    if (catalog instanceof Closeable) {
+      ((Closeable) catalog).close();
+    }
+  }
 
   static Set<Integer> getEqualityFieldIds(Set<String> equalityFields, Schema schema) {
     if (equalityFields == null || equalityFields.isEmpty()) {
