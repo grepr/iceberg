@@ -222,17 +222,27 @@ class DynamicRecordProcessor<T> extends ProcessFunction<T, DynamicRecordInternal
     // Collector#close() forbids checked exceptions, so failures are wrapped. Every stage runs even
     // if an earlier one fails, so the catalog is released on the failure path too.
     try {
-      try {
-        generator.close();
-      } finally {
-        try {
-          super.close();
-        } finally {
-          DynamicSinkUtil.closeCatalog(catalog);
-        }
-      }
+      generator.close();
     } catch (Exception e) {
       throw new RuntimeException(e);
+    } finally {
+      closeProcessorAndCatalogUnchecked();
+    }
+  }
+
+  private void closeProcessorAndCatalogUnchecked() {
+    try {
+      closeProcessorAndCatalog();
+    } catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+  }
+
+  private void closeProcessorAndCatalog() throws Exception {
+    try {
+      super.close();
+    } finally {
+      DynamicSinkUtil.closeCatalog(catalog);
     }
   }
 }

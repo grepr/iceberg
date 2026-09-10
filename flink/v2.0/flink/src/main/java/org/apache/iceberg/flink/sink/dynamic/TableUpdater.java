@@ -234,8 +234,7 @@ class TableUpdater {
     } catch (CommitFailedException e) {
       cache.invalidate(identifier);
       PartitionSpec newSpec = cache.spec(identifier, targetSpec);
-      result = PartitionSpecEvolution.evolve(targetSpec, newSpec);
-      if (result.isEmpty()) {
+      if (newSpec != null) {
         LOG.debug("Table {} partition spec updated concurrently to {}", identifier, newSpec);
         return newSpec;
       } else {

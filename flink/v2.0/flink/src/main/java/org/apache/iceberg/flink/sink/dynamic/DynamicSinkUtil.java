@@ -22,8 +22,10 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.Set;
+import java.util.function.Function;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.catalog.Catalog;
+import org.apache.iceberg.flink.CatalogLoader;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.types.Types;
@@ -39,8 +41,23 @@ class DynamicSinkUtil {
    * catalog so it can be called from a {@code close()} which may run after a failed {@code open()}.
    */
   static void closeCatalog(Catalog catalog) throws IOException {
-    if (catalog instanceof Closeable) {
-      ((Closeable) catalog).close();
+    if (catalog instanceof Closeable closeable) {
+      closeable.close();
+    }
+  }
+
+  /** Loads a catalog and transfers ownership only when the owner is created successfully. */
+  static <T> T createWithCatalog(CatalogLoader catalogLoader, Function<Catalog, T> createOwner) {
+    Catalog catalog = catalogLoader.loadCatalog();
+    try {
+      return createOwner.apply(catalog);
+    } catch (RuntimeException | Error e) {
+      try {
+        closeCatalog(catalog);
+      } catch (IOException closeFailure) {
+        e.addSuppressed(closeFailure);
+      }
+      throw e;
     }
   }
 

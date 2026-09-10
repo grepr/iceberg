@@ -134,12 +134,19 @@ class TableSerializerCache implements Serializable {
         Table table = catalog.loadTable(TableIdentifier.parse(tableName));
         schemas = table.schemas();
         specs = table.specs();
-      } finally {
+      } catch (RuntimeException | Error e) {
         try {
           DynamicSinkUtil.closeCatalog(catalog);
-        } catch (IOException e) {
-          throw new UncheckedIOException("Failed to close the catalog for table " + tableName, e);
+        } catch (IOException closeFailure) {
+          e.addSuppressed(closeFailure);
         }
+        throw e;
+      }
+
+      try {
+        DynamicSinkUtil.closeCatalog(catalog);
+      } catch (IOException e) {
+        throw new UncheckedIOException("Failed to close the catalog for table " + tableName, e);
       }
     }
   }

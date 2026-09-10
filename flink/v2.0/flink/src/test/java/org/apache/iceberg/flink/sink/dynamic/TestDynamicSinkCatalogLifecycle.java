@@ -214,6 +214,22 @@ class TestDynamicSinkCatalogLifecycle extends TestFlinkIcebergSinkBase {
   }
 
   @Test
+  void testCatalogClosesWhenOwnerCreationFails() {
+    assertThatThrownBy(
+            () ->
+                DynamicSinkUtil.createWithCatalog(
+                    countingLoader,
+                    catalog -> {
+                      throw new IllegalArgumentException("induced owner creation failure");
+                    }))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("induced owner creation failure");
+
+    assertThat(CountingCatalogLoader.opened(counterId)).isEqualTo(1);
+    assertThat(CountingCatalogLoader.leaked(counterId)).isZero();
+  }
+
+  @Test
   void testAllCatalogsClosedAfterJobCompletion() throws Exception {
     runJob(Lists.newArrayList("1,a", "2,b", "3,c"), -1);
 

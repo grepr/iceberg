@@ -32,6 +32,7 @@ import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SnapshotRef;
 import org.apache.iceberg.Table;
+import org.apache.iceberg.UpdatePartitionSpec;
 import org.apache.iceberg.UpdateSchema;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.Namespace;
@@ -402,12 +403,58 @@ public class TestTableUpdater extends TestFlinkIcebergSinkBase {
                     SCHEMA2,
                     PartitionSpec.unpartitioned(),
                     TableCreator.DEFAULT))
-        .isInstanceOf(CommitFailedException.class);
+        .isInstanceOf(CommitFailedException.class)
+        .hasMessageContaining("Cannot commit");
 
     // The first attempt plus its retries, each losing to a concurrent column of its own.
     assertThat(catalog.loadTable(identifier).schema().columns())
         .extracting(Types.NestedField::name)
         .containsExactly("id", "data", "concurrent1", "concurrent2", "concurrent3", "concurrent4");
+  }
+
+  @Test
+  void testSpecUpdateRetriesAfterLosingToAConcurrentCommit() {
+    InMemoryCatalog catalog = catalogWithTable();
+    TableIdentifier identifier = TableIdentifier.parse("myNamespace.myTable");
+    Catalog conflicting = specConflictingCatalog(catalog, identifier, 1);
+    PartitionSpec targetSpec = PartitionSpec.builderFor(SCHEMA).bucket("data", 10).build();
+    PartitionSpec expectedSpec =
+        PartitionSpec.builderFor(SCHEMA)
+            .withSpecId(1)
+            .bucket("data", 10, "data_bucket_10")
+            .build();
+
+    PartitionSpec result =
+        tableUpdater(conflicting)
+            .update(identifier, SnapshotRef.MAIN_BRANCH, SCHEMA, targetSpec, TableCreator.DEFAULT)
+            .f1;
+
+    assertThat(result).isEqualTo(expectedSpec);
+    assertThat(catalog.loadTable(identifier).spec()).isEqualTo(expectedSpec);
+    assertThat(catalog.loadTable(identifier).properties()).containsEntry("conflict", "1");
+  }
+
+  @Test
+  void testSpecUpdateStopsRetryingAndPropagatesTheLastFailure() {
+    InMemoryCatalog catalog = catalogWithTable();
+    TableIdentifier identifier = TableIdentifier.parse("myNamespace.myTable");
+    Catalog alwaysConflicting = specConflictingCatalog(catalog, identifier, Integer.MAX_VALUE);
+    PartitionSpec targetSpec = PartitionSpec.builderFor(SCHEMA).bucket("data", 10).build();
+
+    assertThatThrownBy(
+            () ->
+                tableUpdater(alwaysConflicting)
+                    .update(
+                        identifier,
+                        SnapshotRef.MAIN_BRANCH,
+                        SCHEMA,
+                        targetSpec,
+                        TableCreator.DEFAULT))
+        .isInstanceOf(CommitFailedException.class)
+        .hasMessageContaining("Cannot commit");
+
+    assertThat(catalog.loadTable(identifier).spec()).isEqualTo(PartitionSpec.unpartitioned());
+    assertThat(catalog.loadTable(identifier).properties()).containsEntry("conflict", "4");
   }
 
   private static InMemoryCatalog catalogWithTable() {
@@ -479,11 +526,67 @@ public class TestTableUpdater extends TestFlinkIcebergSinkBase {
             });
   }
 
-  private static Object invoke(Object target, Method method, Object[] args) throws Throwable {
+  /**
+   * Wraps a catalog so that each of the first {@code conflicts} partition-spec commits loses a
+   * pointer race to a table-property commit through a freshly loaded handle.
+   */
+  private static Catalog specConflictingCatalog(
+      Catalog delegate, TableIdentifier identifier, int conflicts) {
+    AtomicInteger remaining = new AtomicInteger(conflicts);
+    return (Catalog)
+        Proxy.newProxyInstance(
+            TestTableUpdater.class.getClassLoader(),
+            new Class<?>[] {Catalog.class, SupportsNamespaces.class},
+            (catalogProxy, catalogMethod, catalogArgs) -> {
+              Object loaded = invoke(delegate, catalogMethod, catalogArgs);
+              if (!"loadTable".equals(catalogMethod.getName())) {
+                return loaded == delegate ? catalogProxy : loaded;
+              }
+
+              Table table = (Table) loaded;
+              return Proxy.newProxyInstance(
+                  TestTableUpdater.class.getClassLoader(),
+                  new Class<?>[] {Table.class},
+                  (tableProxy, tableMethod, tableArgs) -> {
+                    Object updateApi = invoke(table, tableMethod, tableArgs);
+                    if (!"updateSpec".equals(tableMethod.getName())) {
+                      return updateApi == table ? tableProxy : updateApi;
+                    }
+
+                    UpdatePartitionSpec update = (UpdatePartitionSpec) updateApi;
+                    return Proxy.newProxyInstance(
+                        TestTableUpdater.class.getClassLoader(),
+                        new Class<?>[] {UpdatePartitionSpec.class},
+                        (updateProxy, updateMethod, updateArgs) -> {
+                          if ("commit".equals(updateMethod.getName())) {
+                            int attempt = remaining.getAndDecrement();
+                            if (attempt > 0) {
+                              delegate
+                                  .loadTable(identifier)
+                                  .updateProperties()
+                                  .set("conflict", String.valueOf(conflicts - attempt + 1))
+                                  .commit();
+                            }
+                          }
+
+                          Object updated = invoke(update, updateMethod, updateArgs);
+                          return updated == update ? updateProxy : updated;
+                        });
+                  });
+            });
+  }
+
+  private static Object invoke(Object target, Method method, Object[] args) throws Exception {
     try {
       return method.invoke(target, args);
     } catch (InvocationTargetException e) {
-      throw e.getCause();
+      Throwable cause = e.getCause();
+      if (cause instanceof Exception exception) {
+        throw exception;
+      } else if (cause instanceof Error error) {
+        throw error;
+      }
+      throw new RuntimeException(cause);
     }
   }
 }
