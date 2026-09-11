@@ -124,6 +124,7 @@ class TableMetadataCache {
             true,
             table.refs().keySet(),
             table.schemas(),
+            table.schema().schemaId(),
             table.specs(),
             inputSchemasPerTableCacheMaximumSize));
   }
@@ -142,6 +143,33 @@ class TableMetadataCache {
     }
   }
 
+  /**
+   * The cached result for {@code input} against the table's current schema, or null if the current
+   * schema is unknown or does not match it exactly.
+   */
+  private ResolvedSchemaInfo resolveAgainstCurrentSchema(CacheItem cached, Schema input) {
+    if (cached.currentSchemaId == null) {
+      return null;
+    }
+
+    Schema currentSchema = cached.tableSchemas.get(cached.currentSchemaId);
+    if (currentSchema == null) {
+      return null;
+    }
+
+    CompareSchemasVisitor.Result result =
+        CompareSchemasVisitor.visit(input, currentSchema, caseSensitive, dropUnusedColumns);
+    if (result != CompareSchemasVisitor.Result.SAME) {
+      return null;
+    }
+
+    ResolvedSchemaInfo resolved =
+        new ResolvedSchemaInfo(
+            currentSchema, CompareSchemasVisitor.Result.SAME, DataConverter.identity());
+    cached.inputSchemas.put(input, resolved);
+    return resolved;
+  }
+
   private ResolvedSchemaInfo schema(
       TableIdentifier identifier, Schema input, boolean allowRefresh) {
     CacheItem cached = tableCache.get(identifier);
@@ -154,6 +182,18 @@ class TableMetadataCache {
       ResolvedSchemaInfo lastResult = cached.inputSchemas.get(input);
       if (lastResult != null) {
         return lastResult;
+      }
+
+      // Prefer the table's current schema. The loop below matches by name only, so an input
+      // schema is equally SAME against any historical schema with the same field names, and
+      // iteration order is oldest first. A column that was dropped and re-added under the same
+      // name has a new field id, while the pre-drop schema still matches by name and comes first —
+      // so without this the writer would resolve to the older schema and write that column under
+      // the dropped id, which readers projecting by id see as NULL in every file written.
+
+      ResolvedSchemaInfo current = resolveAgainstCurrentSchema(cached, input);
+      if (current != null) {
+        return current;
       }
 
       for (Map.Entry<Integer, Schema> tableSchema : cached.tableSchemas.entrySet()) {
@@ -221,7 +261,7 @@ class TableMetadataCache {
     } catch (NoSuchTableException | NoSuchNamespaceException e) {
       LOG.debug("Table or namespace doesn't exist {}", identifier, e);
       tableCache.put(
-          identifier, new CacheItem(cacheRefreshClock.millis(), false, null, null, null, 1));
+          identifier, new CacheItem(cacheRefreshClock.millis(), false, null, null, null, null, 1));
       return Tuple2.of(false, e);
     }
   }
@@ -256,6 +296,7 @@ class TableMetadataCache {
     private final boolean tableExists;
     private final Set<String> branches;
     private final Map<Integer, Schema> tableSchemas;
+    private final Integer currentSchemaId;
     private final Map<Integer, PartitionSpec> specs;
     private final Map<Schema, ResolvedSchemaInfo> inputSchemas;
 
@@ -264,12 +305,14 @@ class TableMetadataCache {
         boolean tableExists,
         Set<String> branches,
         Map<Integer, Schema> tableSchemas,
+        Integer currentSchemaId,
         Map<Integer, PartitionSpec> specs,
         int inputSchemaCacheMaximumSize) {
       this.createdTimestampMillis = createdTimestampMillis;
       this.tableExists = tableExists;
       this.branches = branches;
       this.tableSchemas = tableSchemas;
+      this.currentSchemaId = currentSchemaId;
       this.specs = specs;
       this.inputSchemas =
           new LRUCache<>(inputSchemaCacheMaximumSize, CacheItem::inputSchemaEvictionListener);

@@ -111,6 +111,33 @@ public class TestTableMetadataCache extends TestFlinkIcebergSinkBase {
   }
 
   @Test
+  void testDroppedAndReAddedColumnResolvesToTheCurrentSchema() {
+    Catalog catalog = CATALOG_EXTENSION.catalog();
+    TableIdentifier tableIdentifier = TableIdentifier.parse("default.myTable");
+    Table table = catalog.createTable(tableIdentifier, SCHEMA2);
+
+    // Drop "extra" and add it back under the same name. It returns with a new field id, appended
+    // last, so the pre-drop schema is name-identical to the current one and has the lower id.
+    table.updateSchema().deleteColumn("extra").commit();
+    table.updateSchema().addColumn("extra", Types.StringType.get()).commit();
+    table.refresh();
+
+    int currentExtraId = table.schema().findField("extra").fieldId();
+    assertThat(currentExtraId)
+        .as("premise: re-adding the column must mint a new field id")
+        .isNotEqualTo(SCHEMA2.findField("extra").fieldId());
+
+    TableMetadataCache cache =
+        new TableMetadataCache(catalog, 10, Long.MAX_VALUE, 10, CASE_SENSITIVE, PRESERVE_COLUMNS);
+
+    Schema resolved = cache.schema(tableIdentifier, table.schema()).resolvedTableSchema();
+
+    assertThat(resolved.findField("extra").fieldId())
+        .as("writing under the dropped id makes the column read NULL in every file written")
+        .isEqualTo(currentExtraId);
+  }
+
+  @Test
   void testCachingDisabled() {
     Catalog catalog = CATALOG_EXTENSION.catalog();
     TableIdentifier tableIdentifier = TableIdentifier.parse("default.myTable");
