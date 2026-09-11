@@ -22,7 +22,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.Set;
+import java.util.stream.Collectors;
 import org.apache.flink.core.io.SimpleVersionedSerialization;
 import org.apache.flink.streaming.api.connector.sink2.CommittableMessage;
 import org.apache.flink.streaming.api.connector.sink2.CommittableSummary;
@@ -211,6 +213,69 @@ class TestDynamicWriteResultAggregator {
       assertThat(dynamicCommittable.operatorId())
           .isEqualTo(testHarness.getOperator().getOperatorID().toString());
     }
+  }
+
+  @Test
+  void testFinishEmitsAtTheCheckpointIdAfterTheLastOneSeen() throws Exception {
+    CATALOG_EXTENSION.catalog().createTable(TableIdentifier.of("table"), new Schema());
+
+    DynamicWriteResultAggregator aggregator =
+        new DynamicWriteResultAggregator(CATALOG_EXTENSION.catalogLoader(), cacheMaximumSize);
+    try (OneInputStreamOperatorTestHarness<
+            CommittableMessage<DynamicWriteResult>, CommittableMessage<DynamicCommittable>>
+        testHarness = new OneInputStreamOperatorTestHarness<>(aggregator)) {
+      testHarness.open();
+
+      TableKey tableKey = new TableKey("table", "branch");
+      testHarness.processElement(createRecord(tableKey, 7L, DATA_FILE.specId(), DATA_FILE));
+      testHarness.prepareSnapshotPreBarrier(7L);
+
+      testHarness.processElement(createRecord(tableKey, 7L, DATA_FILE.specId(), DATA_FILE));
+      aggregator.finish();
+
+      // Long.MAX_VALUE would strand this: CommitterOperator commits at endInput() only when
+      // checkpointing is disabled or the job is in BATCH mode, and otherwise commits only the
+      // committables at or below a completed checkpoint's id.
+      assertThat(lastCommittable(testHarness).getCommittable().checkpointId()).isEqualTo(8L);
+      SinkV2Assertions.assertThat(lastCommittable(testHarness)).hasCheckpointId(8L);
+    }
+  }
+
+  @Test
+  void testFinishAfterRestoreEmitsBeyondTheRestoredCheckpointId() throws Exception {
+    CATALOG_EXTENSION.catalog().createTable(TableIdentifier.of("table"), new Schema());
+
+    DynamicWriteResultAggregator aggregator =
+        new DynamicWriteResultAggregator(CATALOG_EXTENSION.catalogLoader(), cacheMaximumSize);
+    try (OneInputStreamOperatorTestHarness<
+            CommittableMessage<DynamicWriteResult>, CommittableMessage<DynamicCommittable>>
+        testHarness = new OneInputStreamOperatorTestHarness<>(aggregator)) {
+      testHarness.open();
+      // What initializeState() reads off the restore. Driven directly because the Flink 2.0 test
+      // harness has no way to present a restored checkpoint id to the operator.
+      aggregator.restoreLastCheckpointId(OptionalLong.of(57L));
+
+      TableKey tableKey = new TableKey("table", "branch");
+      testHarness.processElement(createRecord(tableKey, 57L, DATA_FILE.specId(), DATA_FILE));
+      aggregator.finish();
+
+      // Counting from zero here would emit checkpoint id 1, which DynamicCommitter discards: it
+      // skips every request at or below the table's flink.max-committed-checkpoint-id. The tail
+      // has to land above the last id already committed, not merely below Long.MAX_VALUE.
+      assertThat(lastCommittable(testHarness).getCommittable().checkpointId()).isEqualTo(58L);
+    }
+  }
+
+  private static CommittableWithLineage<DynamicCommittable> lastCommittable(
+      OneInputStreamOperatorTestHarness<
+              CommittableMessage<DynamicWriteResult>, CommittableMessage<DynamicCommittable>>
+          testHarness) {
+    List<CommittableMessage<DynamicCommittable>> committables =
+        testHarness.extractOutputValues().stream()
+            .filter(message -> message instanceof CommittableWithLineage)
+            .collect(Collectors.toList());
+    assertThat(committables).isNotEmpty();
+    return extractAndAssertCommittableWithLineage(committables.get(committables.size() - 1));
   }
 
   private static Set<String> getManifestPaths(
